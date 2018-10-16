@@ -1,0 +1,93 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io/ioutil"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"runtime"
+	"sync"
+	"time"
+)
+
+type RequestCounter map[time.Time]int
+type TotalFunc func(time.Time, time.Time) int
+
+const WindowSize = 60
+const SaveFilename = "invocations.json"
+
+func main() {
+	runtime.GOMAXPROCS(runtime.NumCPU())
+	ctx, cancel := context.WithCancel(context.Background())
+	bytes, _ := ioutil.ReadFile(SaveFilename)
+	savedInvocations := make([]time.Time, 100)
+	json.Unmarshal(bytes, &savedInvocations)
+	invocations, total := startCounter(ctx, savedInvocations)
+	go http.ListenAndServe("0.0.0.0:8081", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		now := time.Now()
+		invocations <- now
+		runtime.Gosched()
+		w.Write([]byte(fmt.Sprintf("requests in the last %ds: %d", WindowSize, total(now.Add(-1*WindowSize*time.Second), now))))
+	}))
+	hookOnExit(cancel)
+	<-ctx.Done()
+}
+
+func hookOnExit(cancel context.CancelFunc) {
+	go func(cancel context.CancelFunc) {
+		signals := make(chan os.Signal, 1)
+		signal.Notify(signals, os.Kill, os.Interrupt)
+		<-signals
+		log.Println("hookOnExit: initiating shutdown ...")
+		cancel()
+	}(cancel)
+}
+
+func startCounter(ctx context.Context, initialData []time.Time) (chan time.Time, TotalFunc) {
+	invocations := append(make([]time.Time, len(initialData)), initialData...)
+	rps := make(chan time.Time, 1000)
+	invocationsAccess := &sync.Mutex{}
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case t := <-rps:
+				func(t time.Time) {
+					invocationsAccess.Lock()
+					defer invocationsAccess.Unlock()
+					invocations = append(invocations, t)
+				}(t)
+			case <-time.Tick(time.Second):
+				go func() {
+					invocationsAccess.Lock()
+					defer invocationsAccess.Unlock()
+					invocationsToSave := []time.Time{}
+					cutTime := time.Now().Add(-1 * WindowSize * time.Second)
+					for _, t := range invocations {
+						if t.After(cutTime) || t.Equal(cutTime) {
+							invocationsToSave = append(invocationsToSave, t)
+						}
+					}
+					bytes, _ := json.Marshal(invocationsToSave)
+					ioutil.WriteFile(SaveFilename, bytes, 0666)
+				}()
+			}
+		}
+	}()
+	return rps, func(start time.Time, end time.Time) int {
+		invocationsAccess.Lock()
+		defer invocationsAccess.Unlock()
+		count := 0
+		for _, t := range invocations {
+			if (t.After(start) || t.Equal(start)) && (t.Before(end) || t.Equal(end)) {
+				count++
+			}
+		}
+		return count
+	}
+}
