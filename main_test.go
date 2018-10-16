@@ -12,7 +12,7 @@ import (
 )
 
 func TestSimpleCounting(t *testing.T) {
-	invocationRecorder := NewInvocationRecorder(false)
+	invocationRecorder := NewInvocationRecorder(nil, false)
 	events := make(chan time.Time, 100)
 	ts := httptest.NewServer(createHandler(invocationRecorder, events))
 	defer ts.Close()
@@ -31,7 +31,7 @@ func TestSimpleCounting(t *testing.T) {
 }
 
 func TestMultiCounting(t *testing.T) {
-	invocationRecorder := NewInvocationRecorder(false)
+	invocationRecorder := NewInvocationRecorder(nil, false)
 	events := make(chan time.Time, 100)
 	ts := httptest.NewServer(createHandler(invocationRecorder, events))
 	defer ts.Close()

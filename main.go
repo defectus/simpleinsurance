@@ -29,15 +29,17 @@ const ElementSeparator = "\n"
 type InvocationRecorder struct {
 	mutex           *sync.Mutex
 	invocationTimes []time.Time
+	prunedEvents    chan []time.Time
 	debug           bool
 }
 
 // NewInvocationRecorder creates instance of Invocationrecorder.
-func NewInvocationRecorder(debug bool) *InvocationRecorder {
+func NewInvocationRecorder(prunedEvents chan []time.Time, debug bool) *InvocationRecorder {
 	return &InvocationRecorder{
 		mutex:           &sync.Mutex{},
 		invocationTimes: make([]time.Time, 100),
 		debug:           debug,
+		prunedEvents:    prunedEvents,
 	}
 }
 
@@ -58,11 +60,11 @@ func (i *InvocationRecorder) Record(when time.Time) int {
 }
 
 // Prune eliminates useless events (older than time window) and let the remaining of events persist.
-func (i *InvocationRecorder) Prune(events chan<- []time.Time) {
+func (i *InvocationRecorder) Prune() {
 	i.mutex.Lock()
 	defer i.mutex.Unlock()
 	if i.debug {
-		log.Printf("pruning events before: %d", len(events))
+		log.Printf("pruning events before: %d", len(i.invocationTimes))
 	}
 	invocationsToSave := []time.Time{}
 	cutTime := time.Now().Add(-1 * WindowSizeInSeconds * time.Second)
@@ -75,7 +77,7 @@ func (i *InvocationRecorder) Prune(events chan<- []time.Time) {
 		log.Printf("pruning events after: %d", len(invocationsToSave))
 	}
 	i.invocationTimes = invocationsToSave
-	events <- invocationsToSave
+	i.prunedEvents <- invocationsToSave
 }
 
 // Load reads saved invocaion from file into its internal storage.
@@ -128,11 +130,12 @@ func main() {
 	flag.BoolVar(&debug, "d", false, "show debug information")
 	flag.Parse()
 
-	invocations := NewInvocationRecorder(debug)
+	events := make(chan time.Time, 100)
+	prunedEvents := make(chan []time.Time, 10)
+
+	invocations := NewInvocationRecorder(prunedEvents, debug)
 	invocations.Load(SaveFilename)
 
-	events := make(chan time.Time, 100)
-	prune := make(chan []time.Time, 10)
 	go func() {
 		f, err := os.OpenFile(SaveFilename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
@@ -150,7 +153,7 @@ func main() {
 					continue
 				}
 				f.WriteString(string(stringEvent) + ElementSeparator)
-			case events := <-prune:
+			case events := <-prunedEvents:
 				f.Truncate(0)
 				f.Seek(0, 0)
 				for _, event := range events {
@@ -171,7 +174,7 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-time.After(time.Minute):
-				invocations.Prune(prune)
+				invocations.Prune()
 			}
 		}
 	}()
